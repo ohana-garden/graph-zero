@@ -55,6 +55,15 @@ from graph_zero.interface.interface import (
     SessionManager, build_dashboard, ZLayer,
 )
 
+# MCP imports
+try:
+    from mcp.server.sse import SseServerTransport
+    from graph_zero.mcp.server import create_mcp_server
+    from starlette.routing import Route, Mount
+    HAS_MCP = True
+except ImportError:
+    HAS_MCP = False
+
 
 # ============================================================
 # Global State
@@ -102,6 +111,33 @@ async def lifespan(app: FastAPI):
     engine = ExecutionEngine(graph)
     session_mgr = SessionManager(graph, engine)
     replicator = LogReplicator()
+
+    # MCP server setup
+    if HAS_MCP:
+        mcp_server = create_mcp_server(
+            lambda: graph, lambda: engine, lambda: session_mgr,
+            COMMUNITY_ID, COMMUNITY_NAME)
+        sse = SseServerTransport("/mcp/messages/")
+
+        async def handle_sse(request):
+            async with sse.connect_sse(
+                request.scope, request.receive, request._send
+            ) as streams:
+                await mcp_server.run(
+                    streams[0], streams[1], mcp_server.create_initialization_options()
+                )
+
+        async def handle_messages(request):
+            await sse.handle_post_message(request.scope, request.receive, request._send)
+
+        from starlette.routing import Route, Mount
+        app.routes.append(Route("/mcp/sse", endpoint=handle_sse))
+        app.routes.append(Route("/mcp/messages/", endpoint=handle_messages, methods=["POST"]))
+
+        print(f"  MCP: enabled at /mcp/sse")
+    else:
+        print(f"  MCP: disabled (mcp package not installed)")
+
     print(f"Graph Zero booted: {COMMUNITY_NAME} ({COMMUNITY_ID})")
     print(f"  Backend: {backend_name}")
     print(f"  Nodes: {graph.node_count}, Edges: {graph.edge_count}")
@@ -235,7 +271,25 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "nodes": graph.node_count, "edges": graph.edge_count}
+    mcp_status = "enabled" if HAS_MCP else "disabled"
+    return {"status": "healthy", "nodes": graph.node_count, "edges": graph.edge_count,
+            "mcp": mcp_status}
+
+@app.get("/mcp/info")
+async def mcp_info():
+    """MCP server discovery endpoint for Agent Zero and other clients."""
+    return {
+        "name": "graph-zero",
+        "version": "0.6.0",
+        "description": "Graph-native agent framework with moral geometry",
+        "mcp_enabled": HAS_MCP,
+        "sse_endpoint": "/mcp/sse",
+        "messages_endpoint": "/mcp/messages/",
+        "tools": 20,
+        "community_id": COMMUNITY_ID,
+        "community_name": COMMUNITY_NAME,
+        "connection_url": "https://graph-zero-production-2a4d.up.railway.app/mcp/sse",
+    }
 
 
 # ============================================================
