@@ -155,7 +155,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -608,6 +608,20 @@ async def graph_stats():
         "node_types": {nt: len(graph.get_nodes_by_type(nt))
                        for nt in set(n.node_type for n in graph._nodes.values())},
     }
+
+@app.get("/dashboard", response_class=None)
+async def serve_dashboard():
+    """Serve the Graph Zero dashboard."""
+    import os
+    from fastapi.responses import HTMLResponse
+    html_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    if not os.path.exists(html_path):
+        html_path = "/app/static/index.html"
+    try:
+        with open(html_path) as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        return HTMLResponse(content="<h1>Dashboard not found</h1>", status_code=404)
 
 
 # ============================================================

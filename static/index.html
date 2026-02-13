@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Graph Zero — Lower Puna Community</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --earth: #8B4513; --earth-light: rgba(139,69,19,0.12); --earth-faint: rgba(139,69,19,0.06);
+  --green: #2E8B57; --gold: #DAA520; --blue: #4682B4; --sienna: #A0522D;
+  --text: #5C4033; --text-dim: rgba(92,64,51,0.5); --text-ghost: rgba(92,64,51,0.25);
+  --cream: #FDF5E6; --bg: linear-gradient(135deg, #FDF5E6 0%, #F5E6D3 50%, #EDE0D4 100%);
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:'Cormorant Garamond',Georgia,serif; color:var(--text); background:var(--bg); min-height:100vh; }
+.wrap { max-width:1100px; margin:0 auto; padding:32px 24px; position:relative; z-index:1; }
+
+/* Header */
+.hdr-sub { font-size:13px; letter-spacing:4px; color:rgba(139,69,19,0.4); text-transform:uppercase; margin-bottom:4px; }
+.hdr-title { font-size:42px; font-weight:300; color:var(--earth); letter-spacing:2px; line-height:1; }
+.hdr-meta { font-size:11px; color:var(--text-ghost); margin-top:6px; letter-spacing:1px; }
+.hdr { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:32px; }
+
+/* Tabs */
+.tabs { display:flex; gap:4px; border-bottom:1px solid var(--earth-light); }
+.tab { padding:10px 20px; border:none; border-radius:8px 8px 0 0; cursor:pointer; font-size:11px;
+  font-weight:700; letter-spacing:2px; text-transform:uppercase; font-family:inherit;
+  background:transparent; color:var(--text-dim); border-bottom:2px solid transparent; transition:all .2s; }
+.tab.active { background:rgba(253,245,230,0.85); color:var(--earth); border-bottom-color:var(--earth); }
+
+/* Cards */
+.card { background:rgba(253,245,230,0.85); backdrop-filter:blur(12px); border:1px solid var(--earth-light);
+  border-radius:12px; padding:20px 24px; box-shadow:0 2px 20px var(--earth-faint); }
+.card-title { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:2px; margin-bottom:14px; }
+.card[data-accent="green"] { border-top:3px solid var(--green); }
+.card[data-accent="green"] .card-title { color:var(--green); }
+.card[data-accent="gold"] { border-top:3px solid var(--gold); }
+.card[data-accent="gold"] .card-title { color:var(--gold); }
+.card[data-accent="blue"] { border-top:3px solid var(--blue); }
+.card[data-accent="blue"] .card-title { color:var(--blue); }
+.card[data-accent="sienna"] { border-top:3px solid var(--sienna); }
+.card[data-accent="sienna"] .card-title { color:var(--sienna); }
+.card[data-accent="earth"] { border-top:3px solid var(--earth); }
+.card[data-accent="earth"] .card-title { color:var(--earth); }
+
+/* Stats */
+.stat-val { font-size:28px; font-weight:300; line-height:1; }
+.stat-lbl { font-size:9px; text-transform:uppercase; letter-spacing:1.5px; color:var(--text-dim); margin-top:4px; }
+
+/* Grid */
+.grid4 { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-top:20px; }
+.grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.span2 { grid-column:span 2; }
+
+/* Forms */
+input,textarea,select { padding:8px 12px; border:1px solid rgba(139,69,19,0.2); border-radius:6px;
+  background:rgba(253,245,230,0.6); font-size:13px; color:var(--text); font-family:inherit; outline:none; width:100%; }
+textarea { resize:vertical; }
+.btn { padding:8px 20px; background:var(--green); color:var(--cream); border:none; border-radius:6px;
+  font-size:12px; font-weight:600; cursor:pointer; font-family:inherit; letter-spacing:1px;
+  text-transform:uppercase; transition:all .2s; box-shadow:0 2px 8px rgba(46,139,87,0.2); }
+.btn:hover { opacity:0.85; transform:translateY(-1px); }
+.btn-ghost { background:transparent; color:var(--earth); border:1px solid var(--earth-light); box-shadow:none; }
+.btn-gold { background:var(--gold); }
+
+/* Agent list */
+.agent-item { padding:10px 12px; border-radius:8px; cursor:pointer; margin-bottom:6px;
+  border:1px solid var(--earth-faint); transition:all .2s; }
+.agent-item:hover,.agent-item.active { background:rgba(46,139,87,0.08); }
+.agent-name { font-weight:600; font-size:14px; }
+.agent-sub { font-size:10px; color:var(--text-dim); }
+
+/* Terrain */
+.terrain-item { padding:12px 16px; border-radius:8px; margin-bottom:8px;
+  background:rgba(218,165,32,0.04); border:1px solid rgba(218,165,32,0.12); }
+.terrain-text { font-size:14px; font-weight:600; }
+.terrain-meta { font-size:10px; margin-top:4px; color:var(--text-dim); }
+.layer-badge { padding:2px 8px; border-radius:10px; font-size:9px; font-weight:700;
+  color:var(--cream); text-transform:uppercase; letter-spacing:1px; display:inline-block; }
+
+/* Virtue bars */
+.vbar { display:flex; align-items:center; gap:8px; margin-bottom:3px; }
+.vbar-name { font-size:10px; width:80px; opacity:0.5; }
+.vbar-track { flex:1; height:4px; background:rgba(139,69,19,0.08); border-radius:2px; overflow:hidden; }
+.vbar-fill { height:100%; background:var(--green); border-radius:2px; transition:width .4s; }
+.vbar-val { font-size:10px; font-weight:600; width:30px; text-align:right; }
+
+/* Trust ring */
+.trust-ring { width:48px; height:48px; border-radius:50%; display:flex; align-items:center; justify-content:center; }
+.trust-inner { width:36px; height:36px; border-radius:50%; background:var(--cream);
+  display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; }
+
+/* Kala bar */
+.kala-track { flex:1; height:6px; background:rgba(139,69,19,0.1); border-radius:3px; overflow:hidden; }
+.kala-fill { height:100%; background:linear-gradient(90deg,var(--gold),#8B6914); border-radius:3px; transition:width .6s; }
+
+/* MCP tool grid */
+.tool-pill { padding:4px 8px; border-radius:4px; font-size:10px; background:rgba(70,130,180,0.06);
+  font-family:monospace; color:var(--blue); }
+.code-block { padding:10px 12px; border-radius:6px; background:rgba(70,130,180,0.06);
+  font-family:monospace; font-size:10px; white-space:pre; overflow-x:auto; }
+
+/* Node type list */
+.nt-row { display:flex; justify-content:space-between; font-size:12px; padding:2px 0;
+  border-bottom:1px solid var(--earth-faint); }
+.nt-key { opacity:0.6; } .nt-val { font-weight:600; }
+
+/* Mini stat boxes */
+.mini-stat { padding:8px 12px; border-radius:6px; text-align:center; }
+.mini-stat-val { font-size:18px; font-weight:300; }
+.mini-stat-lbl { font-size:9px; text-transform:uppercase; letter-spacing:1px; opacity:0.5; }
+
+/* Layout helpers */
+.flex { display:flex; } .gap8 { gap:8px; } .gap12 { gap:12px; } .gap16 { gap:16px; } .gap24 { gap:24px; } .gap32 { gap:32px; }
+.col { flex-direction:column; } .aic { align-items:center; } .jcsb { justify-content:space-between; }
+.f1 { flex:1; } .tc { text-align:center; } .mono { font-family:monospace; }
+.hash { font-size:9px; margin-top:12px; color:var(--text-ghost); font-family:monospace; word-break:break-all; }
+.placeholder { text-align:center; padding:40px; color:rgba(92,64,51,0.3); }
+.footer { margin-top:40px; text-align:center; font-size:10px; color:var(--text-ghost); letter-spacing:2px; }
+.sidebar { width:340px; flex-shrink:0; }
+.panel { margin-top:20px; }
+.hidden { display:none; }
+
+/* Loading */
+.loading { min-height:100vh; display:flex; align-items:center; justify-content:center; }
+.loading h1 { font-size:36px; font-weight:300; letter-spacing:4px; color:var(--earth); }
+.loading p { font-size:12px; letter-spacing:3px; margin-top:8px; opacity:0.5; color:var(--earth); }
+
+/* Canvas bg */
+#bgcanvas { position:fixed; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:0; opacity:0.7; }
+
+/* Responsive */
+@media(max-width:800px) {
+  .grid4 { grid-template-columns:1fr 1fr; }
+  .span2 { grid-column:span 1; }
+  .flex.responsive { flex-direction:column; }
+  .sidebar { width:100%; }
+}
+</style>
+</head>
+<body>
+
+<canvas id="bgcanvas" width="1200" height="900"></canvas>
+
+<div id="loading" class="loading">
+  <div class="tc">
+    <h1>GRAPH ZERO</h1>
+    <p>CONNECTING...</p>
+  </div>
+</div>
+
+<div id="app" class="wrap hidden">
+  <!-- Header -->
+  <div class="hdr">
+    <div>
+      <div class="hdr-sub" id="hdr-community"></div>
+      <div class="hdr-title">Graph Zero</div>
+      <div class="hdr-meta" id="hdr-meta"></div>
+    </div>
+    <button class="btn btn-ghost" onclick="fetchAll()">↻ Refresh</button>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" data-tab="overview" onclick="switchTab('overview',this)">Overview</button>
+    <button class="tab" data-tab="agents" onclick="switchTab('agents',this)">Agents</button>
+    <button class="tab" data-tab="terrain" onclick="switchTab('terrain',this)">Terrain</button>
+    <button class="tab" data-tab="mcp" onclick="switchTab('mcp',this)">MCP</button>
+  </div>
+
+  <!-- OVERVIEW -->
+  <div id="tab-overview" class="panel">
+    <div class="grid4">
+      <div class="card" data-accent="green"><div class="card-title">Agents</div>
+        <div class="tc"><div class="stat-val" style="color:var(--green)" id="ov-agents">0</div><div class="stat-lbl">Active</div></div></div>
+      <div class="card" data-accent="gold"><div class="card-title">Terrain</div>
+        <div class="tc"><div class="stat-val" style="color:var(--gold)" id="ov-terrain">0</div><div class="stat-lbl">Nodes</div></div></div>
+      <div class="card" data-accent="blue"><div class="card-title">Sessions</div>
+        <div class="tc"><div class="stat-val" style="color:var(--blue)" id="ov-sessions">0</div><div class="stat-lbl">Active</div></div></div>
+      <div class="card" data-accent="sienna"><div class="card-title">Conflicts</div>
+        <div class="tc"><div class="stat-val" style="color:var(--sienna)" id="ov-conflicts">0</div><div class="stat-lbl">Open</div></div></div>
+
+      <div class="card span2" data-accent="earth"><div class="card-title">Graph</div>
+        <div class="flex gap32">
+          <div class="tc"><div class="stat-val" id="ov-nodes">0</div><div class="stat-lbl">Nodes</div></div>
+          <div class="tc"><div class="stat-val" id="ov-edges">0</div><div class="stat-lbl">Edges</div></div>
+          <div class="f1"><div class="stat-lbl" style="margin-bottom:6px">Node Types</div><div id="ov-types"></div></div>
+        </div>
+        <div class="hash" id="ov-hash"></div>
+      </div>
+
+      <div class="card span2" data-accent="green"><div class="card-title">Vital Signs</div>
+        <div class="grid2 gap12">
+          <div><div class="stat-lbl">Terrain (30d)</div><div class="stat-val" style="font-size:22px" id="ov-t30">0</div></div>
+          <div><div class="stat-lbl">Kala Gini</div><div class="stat-val" style="font-size:22px" id="ov-gini">0</div></div>
+          <div><div class="stat-lbl">Active Agents</div><div class="stat-val" style="font-size:22px" id="ov-active">0</div></div>
+          <div><div class="stat-lbl">Visitors</div><div class="stat-val" style="font-size:22px" id="ov-visitors">0</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- AGENTS -->
+  <div id="tab-agents" class="panel hidden">
+    <div class="flex gap16 responsive">
+      <div class="sidebar flex col gap16">
+        <div class="card" data-accent="green"><div class="card-title">Create Agent</div>
+          <div class="flex col gap8">
+            <input id="new-id" placeholder="vessel_id">
+            <input id="new-name" placeholder="Name">
+            <select id="new-type"><option value="human">Human</option><option value="ai">AI</option><option value="hybrid">Hybrid</option></select>
+            <button class="btn" onclick="createAgent()">Create</button>
+          </div>
+        </div>
+        <div class="card" data-accent="earth"><div class="card-title">Known Agents</div>
+          <div id="agent-list"><div class="placeholder" style="padding:12px">Loading...</div></div>
+        </div>
+      </div>
+      <div class="f1">
+        <div class="card" data-accent="green" id="agent-detail">
+          <div class="placeholder">Select an agent to view constellation</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TERRAIN -->
+  <div id="tab-terrain" class="panel hidden">
+    <div class="flex gap16 responsive">
+      <div class="sidebar flex col gap16">
+        <div class="card" data-accent="gold"><div class="card-title">Add Terrain Node</div>
+          <div class="flex col gap8">
+            <input id="t-id" placeholder="node_id">
+            <textarea id="t-text" placeholder="Knowledge content..." rows="3"></textarea>
+            <select id="t-layer"><option value="community">Community</option><option value="bedrock">Bedrock</option><option value="earned">Earned</option><option value="personal">Personal</option></select>
+            <button class="btn btn-gold" onclick="addTerrain()">Add to Terrain</button>
+          </div>
+        </div>
+        <div class="card" data-accent="earth"><div class="card-title">Query</div>
+          <button class="btn" style="width:100%" onclick="loadTerrain()">Load All Terrain</button>
+        </div>
+      </div>
+      <div class="f1">
+        <div class="card" data-accent="gold"><div class="card-title">Terrain Nodes</div>
+          <div id="terrain-list"><div class="placeholder">Click "Load All Terrain" to explore</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MCP -->
+  <div id="tab-mcp" class="panel hidden">
+    <div class="grid2" style="margin-top:0">
+      <div class="card" data-accent="blue"><div class="card-title">MCP Server</div>
+        <div id="mcp-info"><div class="placeholder">Loading...</div></div>
+      </div>
+      <div class="card" data-accent="blue"><div class="card-title">Available Tools (19)</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px" id="mcp-tools"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">GRAPH ZERO · MANA OHANA FOUNDATION · LOWER PUNA, HAWAIʻI</div>
+</div>
+
+<script>
+const API = "https://graph-zero-production-2a4d.up.railway.app";
+const VIRTUES = ["Unity","Justice","Truthfulness","Love","Detachment","Humility","Compassion","Wisdom","Service"];
+const LAYER_COLORS = { bedrock:"#8B4513", community:"#2E8B57", earned:"#DAA520", personal:"#4682B4" };
+
+let state = { root:null, dash:null, stats:null, agents:[], mcpInfo:null, selectedAgent:null };
+
+// ---- Background animation ----
+(function(){
+  const c=document.getElementById("bgcanvas"), ctx=c.getContext("2d");
+  const nodes=Array.from({length:40},()=>({x:Math.random()*1200,y:Math.random()*900,
+    vx:(Math.random()-.5)*.3,vy:(Math.random()-.5)*.3,r:Math.random()*2+1}));
+  function draw(){
+    ctx.clearRect(0,0,1200,900);
+    nodes.forEach(n=>{n.x+=n.vx;n.y+=n.vy;if(n.x<0||n.x>1200)n.vx*=-1;if(n.y<0||n.y>900)n.vy*=-1});
+    ctx.strokeStyle="rgba(139,69,19,0.06)";ctx.lineWidth=.5;
+    for(let i=0;i<nodes.length;i++)for(let j=i+1;j<nodes.length;j++){
+      const d=Math.hypot(nodes[i].x-nodes[j].x,nodes[i].y-nodes[j].y);
+      if(d<150){ctx.beginPath();ctx.moveTo(nodes[i].x,nodes[i].y);ctx.lineTo(nodes[j].x,nodes[j].y);ctx.stroke()}}
+    nodes.forEach(n=>{ctx.beginPath();ctx.arc(n.x,n.y,n.r,0,Math.PI*2);ctx.fillStyle="rgba(139,69,19,0.15)";ctx.fill()});
+    requestAnimationFrame(draw);
+  }
+  draw();
+})();
+
+// ---- API helpers ----
+async function api(path, opts) {
+  const r = await fetch(API + path, opts);
+  if (!r.ok) throw new Error(`${r.status}`);
+  return r.json();
+}
+async function apiPost(path, data) {
+  return api(path, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(data) });
+}
+
+// ---- Fetch all ----
+async function fetchAll() {
+  try {
+    const [root, dash, stats, mcp] = await Promise.all([
+      api("/"), api("/community/dashboard"), api("/graph/stats"),
+      api("/mcp/info").catch(()=>null)
+    ]);
+    state.root=root; state.dash=dash; state.stats=stats; state.mcpInfo=mcp;
+
+    // Try known agent IDs
+    const agentList = [];
+    if (stats.node_types?.VesselAnchor > 0) {
+      // Get all vessel anchors by querying graph stats won't give us IDs
+      // Try common ones + any previously created
+      const tryIds = ["kawika","leilani","mcp_agent_test"];
+      for (const id of tryIds) {
+        try { const a = await api(`/agents/${id}`); if(a.vessel_id) agentList.push(a); } catch{}
+      }
+    }
+    state.agents = agentList;
+
+    document.getElementById("loading").classList.add("hidden");
+    document.getElementById("app").classList.remove("hidden");
+    renderAll();
+  } catch(e) {
+    document.getElementById("loading").innerHTML = `<div class="tc">
+      <h1 style="color:var(--sienna)">Connection Error</h1>
+      <p>${e.message}</p>
+      <button class="btn" style="margin-top:16px" onclick="fetchAll()">Retry</button></div>`;
+  }
+}
+
+// ---- Render ----
+function renderAll() {
+  const {root,dash,stats,mcpInfo,agents} = state;
+
+  // Header
+  document.getElementById("hdr-community").textContent = root.community || "Graph Zero";
+  document.getElementById("hdr-meta").textContent =
+    `v${root.version} · ${root.backend} · ${root.status}${mcpInfo?.mcp_enabled?" · MCP enabled":""}`;
+
+  // Overview
+  document.getElementById("ov-agents").textContent = dash.total_agents||0;
+  document.getElementById("ov-terrain").textContent = dash.total_terrain||0;
+  document.getElementById("ov-sessions").textContent = dash.active_sessions||0;
+  document.getElementById("ov-conflicts").textContent = dash.open_conflicts||0;
+  document.getElementById("ov-nodes").textContent = stats.nodes||0;
+  document.getElementById("ov-edges").textContent = stats.edges||0;
+  document.getElementById("ov-hash").textContent = "hash: " + (stats.state_hash||"").slice(0,32) + "...";
+
+  let typesHtml = "";
+  if(stats.node_types) Object.entries(stats.node_types).forEach(([k,v])=>{
+    typesHtml += `<div class="nt-row"><span class="nt-key">${k}</span><span class="nt-val">${v}</span></div>`;
+  });
+  document.getElementById("ov-types").innerHTML = typesHtml;
+
+  const vs = dash.vital_signs||{};
+  document.getElementById("ov-t30").textContent = vs.terrain_additions_30d||0;
+  document.getElementById("ov-gini").textContent = (vs.kala_concentration||0).toFixed(3);
+  document.getElementById("ov-active").textContent = vs.active_agents||0;
+  document.getElementById("ov-visitors").textContent = dash.visiting_agents||0;
+
+  // Agents list
+  let agHtml = "";
+  if(!agents.length) agHtml = '<div style="font-size:12px;opacity:0.4">No agents found</div>';
+  agents.forEach(a=>{
+    const cls = state.selectedAgent===a.vessel_id ? "agent-item active" : "agent-item";
+    agHtml += `<div class="${cls}" onclick="loadAgent('${a.vessel_id}')">
+      <div class="agent-name">${a.name||a.vessel_id}</div>
+      <div class="agent-sub">${a.type} · ${a.vessel_id}</div></div>`;
+  });
+  document.getElementById("agent-list").innerHTML = agHtml;
+
+  // MCP
+  if(mcpInfo) {
+    document.getElementById("mcp-info").innerHTML = `
+      <div class="grid2 gap12" style="margin-bottom:16px">
+        <div class="tc"><div class="stat-val" style="color:${mcpInfo.mcp_enabled?'var(--green)':'var(--sienna)'}">${mcpInfo.mcp_enabled?'Live':'Off'}</div><div class="stat-lbl">Status</div></div>
+        <div class="tc"><div class="stat-val" style="color:var(--blue)">${mcpInfo.tools}</div><div class="stat-lbl">Tools</div></div>
+      </div>
+      <div class="stat-lbl" style="margin-bottom:4px">SSE Endpoint</div>
+      <div class="code-block" style="margin-bottom:12px;font-size:11px;white-space:normal;word-break:break-all">${mcpInfo.connection_url}</div>
+      <div class="stat-lbl" style="margin-bottom:4px">Agent Zero Config</div>
+      <div class="code-block">{
+  "type": "url",
+  "url": "${mcpInfo.connection_url}",
+  "name": "graph-zero"
+}</div>`;
+  }
+
+  const tools = ["create_agent","get_agent","get_trust","record_interaction",
+    "add_terrain","connect_terrain","query_terrain","ingest_episode","extract_fact",
+    "retrieve_memories","score_action","project_position","dashboard","vitals",
+    "graph_stats","create_session","process_query","close_session","create_snapshot"];
+  document.getElementById("mcp-tools").innerHTML = tools.map(t=>`<div class="tool-pill">${t}</div>`).join("");
+}
+
+// ---- Tabs ----
+function switchTab(name, el) {
+  document.querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));
+  el.classList.add("active");
+  document.querySelectorAll(".panel").forEach(p=>p.classList.add("hidden"));
+  document.getElementById("tab-"+name).classList.remove("hidden");
+}
+
+// ---- Agent detail ----
+async function loadAgent(id) {
+  try {
+    const [agent, trust] = await Promise.all([api(`/agents/${id}`), api(`/agents/${id}/trust`)]);
+    state.selectedAgent = id;
+    const a = {...agent,...trust};
+    const pos = a.moral_position||Array(9).fill(0.5);
+
+    // Virtue radar SVG
+    const sz=180, cx=sz/2, cy=sz/2, r=sz*.38;
+    let radarPts = pos.map((v,i)=>{
+      const ang=(Math.PI*2*i)/9-Math.PI/2;
+      return {x:cx+Math.cos(ang)*r*v, y:cy+Math.sin(ang)*r*v};
+    });
+    let gridSvg = [.25,.5,.75,1].map(s=>{
+      let pts=Array.from({length:9},(_,i)=>{const ang=(Math.PI*2*i)/9-Math.PI/2;
+        return `${cx+Math.cos(ang)*r*s},${cy+Math.sin(ang)*r*s}`;}).join(" ");
+      return `<polygon points="${pts}" fill="none" stroke="rgba(139,69,19,0.12)" stroke-width="0.5"/>`;
+    }).join("");
+    let labelsSvg = VIRTUES.map((v,i)=>{
+      const ang=(Math.PI*2*i)/9-Math.PI/2;
+      return `<text x="${cx+Math.cos(ang)*(r+14)}" y="${cy+Math.sin(ang)*(r+14)}" text-anchor="middle" dominant-baseline="middle" style="font-size:7px;fill:#8B6914">${v.slice(0,3)}</text>`;
+    }).join("");
+    let polyPts = radarPts.map(p=>`${p.x},${p.y}`).join(" ");
+    let dotsSvg = radarPts.map(p=>`<circle cx="${p.x}" cy="${p.y}" r="2.5" fill="var(--green)"/>`).join("");
+    let radar = `<svg width="${sz}" height="${sz+20}" viewBox="0 0 ${sz} ${sz+20}">${gridSvg}${labelsSvg}
+      <polygon points="${polyPts}" fill="rgba(46,139,87,0.2)" stroke="var(--green)" stroke-width="1.5"/>${dotsSvg}
+      <text x="${cx}" y="${sz+14}" text-anchor="middle" style="font-size:10px;fill:var(--text);font-weight:600">Moral Position</text></svg>`;
+
+    // Trust ring
+    const tc = a.trust_ceiling||0;
+    const tcolor = tc>.7?"var(--green)":tc>.4?"var(--gold)":"var(--sienna)";
+
+    // Virtue bars
+    let vbars = VIRTUES.map((v,i)=>`<div class="vbar">
+      <span class="vbar-name">${v}</span>
+      <div class="vbar-track"><div class="vbar-fill" style="width:${(pos[i]||.5)*100}%"></div></div>
+      <span class="vbar-val">${(pos[i]||.5).toFixed(2)}</span></div>`).join("");
+
+    document.getElementById("agent-detail").innerHTML = `<div class="card-title" style="color:var(--green)">${a.name} — ${a.type}</div>
+      <div class="flex gap24 responsive">
+        <div>${radar}</div>
+        <div class="f1 flex col gap16">
+          <div>
+            <div class="stat-lbl" style="margin-bottom:6px">Trust</div>
+            <div class="flex aic gap16">
+              <div class="trust-ring" style="border:3px solid ${tcolor};background:conic-gradient(${tcolor} ${tc*360}deg, rgba(139,69,19,0.08) 0deg)">
+                <div class="trust-inner" style="color:${tcolor}">${(tc*100).toFixed(0)}</div></div>
+              <div style="font-size:11px;color:var(--text-dim)">Paths: ${a.path_count||0}<br>Diversity: ${(a.interaction_diversity||0).toFixed(2)}</div>
+            </div>
+          </div>
+          <div>
+            <div class="stat-lbl" style="margin-bottom:6px">Kala Balance</div>
+            <div class="flex aic gap8"><div class="kala-track"><div class="kala-fill" style="width:${Math.min(100,(a.kala_balance||0)/2)}%"></div></div>
+              <span style="font-size:11px;color:#8B6914;font-weight:600">${a.kala_balance||0}</span></div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+            <div class="mini-stat" style="background:rgba(70,130,180,0.06)"><div class="mini-stat-val">${(a.tools||[]).length}</div><div class="mini-stat-lbl">Tools</div></div>
+            <div class="mini-stat" style="background:rgba(218,165,32,0.06)"><div class="mini-stat-val">${(a.skills||[]).length}</div><div class="mini-stat-lbl">Skills</div></div>
+            <div class="mini-stat" style="background:rgba(46,139,87,0.06)"><div class="mini-stat-val">${a.memories||0}</div><div class="mini-stat-lbl">Memories</div></div>
+          </div>
+          <div><div class="stat-lbl" style="margin-bottom:6px">Virtue Positions</div>${vbars}</div>
+        </div>
+      </div>`;
+
+    // Re-render agent list to show active
+    renderAll();
+  } catch(e) {
+    document.getElementById("agent-detail").innerHTML = `<div class="placeholder">Error: ${e.message}</div>`;
+  }
+}
+
+// ---- Create agent ----
+async function createAgent() {
+  const id=document.getElementById("new-id").value.trim();
+  const name=document.getElementById("new-name").value.trim();
+  const type=document.getElementById("new-type").value;
+  if(!id||!name) return;
+  try {
+    await apiPost("/agents", {vessel_id:id,name,agent_type:type});
+    document.getElementById("new-id").value="";
+    document.getElementById("new-name").value="";
+    state.agents.push({vessel_id:id,name,type});
+    renderAll();
+  } catch(e) { alert("Error: "+e.message); }
+}
+
+// ---- Terrain ----
+async function addTerrain() {
+  const id=document.getElementById("t-id").value.trim();
+  const text=document.getElementById("t-text").value.trim();
+  const layer=document.getElementById("t-layer").value;
+  if(!id||!text) return;
+  try {
+    await apiPost("/terrain", {node_id:id,source_text:text,layer,provenance_type:"WITNESS"});
+    document.getElementById("t-id").value="";
+    document.getElementById("t-text").value="";
+    fetchAll();
+  } catch(e) { alert("Error: "+e.message); }
+}
+
+async function loadTerrain() {
+  try {
+    const r = await apiPost("/terrain/query", {
+      query_embedding:[.5,.5,.5,.5,.5,.5,.5,.5,.5], max_depth:5, limit:50, threshold:0
+    });
+    let html = "";
+    if(!r.results||!r.results.length) html='<div class="placeholder">No terrain nodes found</div>';
+    (r.results||[]).forEach(t=>{
+      const lc = LAYER_COLORS[t.layer]||"#888";
+      html += `<div class="terrain-item">
+        <div class="flex jcsb" style="align-items:flex-start">
+          <div class="f1"><div class="terrain-text">${t.source_text}</div>
+            <div class="terrain-meta">${t.node_id} · depth ${t.depth} · authority ${(t.authority_weight||0).toFixed(2)}</div></div>
+          <span class="layer-badge" style="background:${lc}">${t.layer}</span>
+        </div></div>`;
+    });
+    document.getElementById("terrain-list").innerHTML = html;
+  } catch(e) {
+    document.getElementById("terrain-list").innerHTML = `<div class="placeholder">Error: ${e.message}</div>`;
+  }
+}
+
+// ---- Boot ----
+fetchAll();
+</script>
+</body>
+</html>
