@@ -17,6 +17,13 @@ from pydantic import BaseModel, Field
 
 # Graph Zero imports
 from graph_zero.graph.backend import PropertyGraph
+
+try:
+    from graph_zero.graph.falkordb_backend import FalkorPropertyGraph
+    HAS_FALKORDB = True
+except ImportError:
+    HAS_FALKORDB = False
+
 from graph_zero.graph.schema import (
     NT, ET, bootstrap_community, create_agent, assemble_constellation,
     add_terrain_node, connect_terrain, traverse_terrain, find_entry_points,
@@ -65,13 +72,38 @@ COMMUNITY_NAME = os.getenv("COMMUNITY_NAME", "Lower Puna Community")
 async def lifespan(app: FastAPI):
     """Bootstrap community on startup."""
     global graph, engine, session_mgr, replicator
-    graph = PropertyGraph()
-    bootstrap_community(graph, COMMUNITY_ID, COMMUNITY_NAME)
+
+    falkor_host = os.getenv("FALKORDB_HOST")
+    falkor_port = int(os.getenv("FALKORDB_PORT", "6379"))
+    falkor_pass = os.getenv("FALKORDB_PASSWORD", "")
+    graph_name = os.getenv("FALKORDB_GRAPH", "graph_zero")
+
+    if falkor_host and HAS_FALKORDB:
+        try:
+            graph = FalkorPropertyGraph(
+                host=falkor_host, port=falkor_port,
+                password=falkor_pass, graph_name=graph_name)
+            backend_name = f"FalkorDB ({falkor_host}:{falkor_port}/{graph_name})"
+        except Exception as e:
+            print(f"FalkorDB connection failed: {e}, falling back to in-memory")
+            graph = PropertyGraph()
+            backend_name = "In-Memory (FalkorDB failed)"
+    else:
+        graph = PropertyGraph()
+        backend_name = "In-Memory"
+
+    # Only bootstrap if graph is empty
+    if graph.node_count == 0:
+        bootstrap_community(graph, COMMUNITY_ID, COMMUNITY_NAME)
+        print(f"Bootstrapped: {COMMUNITY_NAME}")
+    else:
+        print(f"Graph already populated: {graph.node_count} nodes, {graph.edge_count} edges")
+
     engine = ExecutionEngine(graph)
     session_mgr = SessionManager(graph, engine)
     replicator = LogReplicator()
     print(f"Graph Zero booted: {COMMUNITY_NAME} ({COMMUNITY_ID})")
-    print(f"  Virtues: {len(graph.get_nodes_by_type(NT.VIRTUE_ANCHOR))}")
+    print(f"  Backend: {backend_name}")
     print(f"  Nodes: {graph.node_count}, Edges: {graph.edge_count}")
     yield
     print("Graph Zero shutting down")
@@ -189,11 +221,13 @@ class ConflictResolve(BaseModel):
 
 @app.get("/")
 async def root():
+    backend = "falkordb" if (HAS_FALKORDB and isinstance(graph, FalkorPropertyGraph)) else "in-memory"
     return {
         "service": "Graph Zero",
         "version": "0.6.0",
         "community": COMMUNITY_NAME,
         "community_id": COMMUNITY_ID,
+        "backend": backend,
         "nodes": graph.node_count,
         "edges": graph.edge_count,
         "status": "operational",
