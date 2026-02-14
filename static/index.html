@@ -265,7 +265,7 @@ textarea { resize:vertical; }
 </div>
 
 <script>
-const API = "https://graph-zero-production-2a4d.up.railway.app";
+const API = "";  // Same origin — use relative paths
 const VIRTUES = ["Unity","Justice","Truthfulness","Love","Detachment","Humility","Compassion","Wisdom","Service"];
 const LAYER_COLORS = { bedrock:"#8B4513", community:"#2E8B57", earned:"#DAA520", personal:"#4682B4" };
 
@@ -302,32 +302,36 @@ async function apiPost(path, data) {
 // ---- Fetch all ----
 async function fetchAll() {
   try {
-    const [root, dash, stats, mcp] = await Promise.all([
-      api("/"), api("/community/dashboard"), api("/graph/stats"),
-      api("/mcp/info").catch(()=>null)
-    ]);
+    const root = await fetch("/").then(r => r.json());
+    const dash = await fetch("/community/dashboard").then(r => r.json());
+    const stats = await fetch("/graph/stats").then(r => r.json());
+    const mcp = await fetch("/mcp/info").then(r => r.json()).catch(function(){return null});
+
     state.root=root; state.dash=dash; state.stats=stats; state.mcpInfo=mcp;
 
-    // Try known agent IDs
-    const agentList = [];
-    if (stats.node_types?.VesselAnchor > 0) {
-      // Get all vessel anchors by querying graph stats won't give us IDs
-      // Try common ones + any previously created
-      const tryIds = ["kawika","leilani","mcp_agent_test"];
-      for (const id of tryIds) {
-        try { const a = await api(`/agents/${id}`); if(a.vessel_id) agentList.push(a); } catch{}
+    // Discover agents via list endpoint
+    var agentList = [];
+    try {
+      var agentResp = await fetch("/agents");
+      if (agentResp.ok) {
+        var agentData = await agentResp.json();
+        agentList = (agentData.agents || []).map(function(a) {
+          return { vessel_id: a.vessel_id, name: a.name, type: a.type, role: a.role };
+        });
       }
-    }
+    } catch(ignore) {}
     state.agents = agentList;
 
-    document.getElementById("loading").classList.add("hidden");
+    document.getElementById("loading").style.display = "none";
+    document.getElementById("app").style.display = "block";
     document.getElementById("app").classList.remove("hidden");
     renderAll();
   } catch(e) {
-    document.getElementById("loading").innerHTML = `<div class="tc">
-      <h1 style="color:var(--sienna)">Connection Error</h1>
-      <p>${e.message}</p>
-      <button class="btn" style="margin-top:16px" onclick="fetchAll()">Retry</button></div>`;
+    console.error("fetchAll error:", e);
+    document.getElementById("loading").innerHTML = '<div class="tc">' +
+      '<h1 style="color:var(--sienna)">Connection Error</h1>' +
+      '<p>' + e.message + '</p>' +
+      '<button class="btn" style="margin-top:16px" onclick="fetchAll()">Retry</button></div>';
   }
 }
 
@@ -368,7 +372,7 @@ function renderAll() {
     const cls = state.selectedAgent===a.vessel_id ? "agent-item active" : "agent-item";
     agHtml += `<div class="${cls}" onclick="loadAgent('${a.vessel_id}')">
       <div class="agent-name">${a.name||a.vessel_id}</div>
-      <div class="agent-sub">${a.type} · ${a.vessel_id}</div></div>`;
+      <div class="agent-sub">${a.role||a.type} · ${a.vessel_id}</div></div>`;
   });
   document.getElementById("agent-list").innerHTML = agHtml;
 

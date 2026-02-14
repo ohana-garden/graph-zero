@@ -263,10 +263,22 @@ def _dispatch(name: str, args: dict, graph, engine, session_mgr,
             entry_ids = find_entry_points(graph, emb, threshold=0.3, limit=5)
         results = traverse_terrain(graph, entry_ids,
                                    args.get("max_depth", 5), args.get("limit", 10))
+        # If traversal empty but we have entry points, return nodes directly
+        if not results and entry_ids:
+            for eid in entry_ids[:args.get("limit", 10)]:
+                node = graph.get_node(eid)
+                if node and node.node_type == "TerrainNode":
+                    from graph_zero.graph.schema import TraversalResult
+                    results.append(TraversalResult(
+                        node=node, source_text=node.get("source_text", ""),
+                        layer=node.get("layer", "community"),
+                        authority_weight=float(node.get("authority_weight", 0.5)),
+                        depth=0, path_weight=1.0,
+                        provenance_types=[node.get("provenance", "UNKNOWN")]))
         return {"entry_points": entry_ids, "results": [{
             "node_id": r.node.id, "source_text": r.source_text,
             "layer": r.layer, "authority_weight": r.authority_weight,
-            "depth": r.depth,
+            "depth": r.depth, "source_work": r.node.get("source_work", ""),
         } for r in results]}
 
     # -- Memory --

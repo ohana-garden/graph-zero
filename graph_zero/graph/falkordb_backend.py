@@ -75,20 +75,20 @@ def _props_to_set(alias: str, props: dict) -> str:
 def _row_to_node(record: dict) -> Node:
     """Convert a FalkorDB node result to our Node dataclass."""
     props = dict(record.properties) if hasattr(record, 'properties') else {}
-    node_id = props.pop("_id", str(record.id) if hasattr(record, 'id') else "?")
+    node_id = props.pop("id", str(record.id) if hasattr(record, 'id') else "?")
     # Labels → node_type (take first label)
     labels = record.labels if hasattr(record, 'labels') else []
-    node_type = labels[0] if labels else props.pop("_node_type", "Unknown")
+    node_type = labels[0] if labels else props.pop("node_type", "Unknown")
     return Node(id=node_id, node_type=node_type, properties=props)
 
 
 def _row_to_edge(record: dict) -> Edge:
     """Convert a FalkorDB relationship result to our Edge dataclass."""
     props = dict(record.properties) if hasattr(record, 'properties') else {}
-    edge_id = props.pop("_id", str(record.id) if hasattr(record, 'id') else "?")
+    edge_id = props.pop("id", str(record.id) if hasattr(record, 'id') else "?")
     source_id = props.pop("_source_id", "")
     target_id = props.pop("_target_id", "")
-    edge_type = record.relation if hasattr(record, 'relation') else props.pop("_edge_type", "UNKNOWN")
+    edge_type = record.relation if hasattr(record, 'relation') else props.pop("edge_type", "UNKNOWN")
     return Edge(id=edge_id, source_id=source_id, target_id=target_id,
                 edge_type=edge_type, properties=props)
 
@@ -119,7 +119,7 @@ class FalkorPropertyGraph:
     def _ensure_indexes(self):
         """Create indexes for _id property on all nodes."""
         try:
-            self._graph.query("CREATE INDEX FOR (n:_Any) ON (n._id)")
+            self._graph.query("CREATE INDEX FOR (n:Any) ON (n.id)")
         except Exception:
             pass  # Index may already exist or _Any not supported
         # We'll create per-label indexes as nodes are added
@@ -140,7 +140,7 @@ class FalkorPropertyGraph:
     def add_node(self, node_id: str, node_type: str,
                  properties: Optional[dict] = None) -> Node:
         props = dict(properties or {})
-        props["_id"] = node_id
+        props["id"] = node_id
 
         # Build property map for Cypher
         prop_str = ", ".join(f"`{k}`: {_prop_to_cypher(v)}" for k, v in props.items()
@@ -148,21 +148,21 @@ class FalkorPropertyGraph:
 
         # MERGE on _id, set all props (overwrite if exists)
         label = node_type.replace(" ", "_").replace("-", "_")
-        query = f"MERGE (n:`{label}` {{_id: '{_escape(node_id)}'}}) SET n = {{{prop_str}}} RETURN n"
+        query = f"MERGE (n:`{label}` {{id: '{_escape(node_id)}'}}) SET n = {{{prop_str}}} RETURN n"
         self._q(query)
 
         return Node(id=node_id, node_type=node_type, properties=properties or {})
 
     def get_node(self, node_id: str) -> Optional[Node]:
         result = self._q(
-            f"MATCH (n {{_id: '{_escape(node_id)}'}}) RETURN n LIMIT 1")
+            f"MATCH (n {{id: '{_escape(node_id)}'}}) RETURN n LIMIT 1")
         if result.result_set:
             return _row_to_node(result.result_set[0][0])
         return None
 
     def has_node(self, node_id: str) -> bool:
         result = self._q(
-            f"MATCH (n {{_id: '{_escape(node_id)}'}}) RETURN count(n) AS c")
+            f"MATCH (n {{id: '{_escape(node_id)}'}}) RETURN count(n) AS c")
         return result.result_set[0][0] > 0
 
     def get_nodes_by_type(self, node_type: str) -> list[Node]:
@@ -182,14 +182,14 @@ class FalkorPropertyGraph:
         if not set_clause:
             return self.get_node(node_id)
         result = self._q(
-            f"MATCH (n {{_id: '{_escape(node_id)}'}}) {set_clause} RETURN n")
+            f"MATCH (n {{id: '{_escape(node_id)}'}}) {set_clause} RETURN n")
         if result.result_set:
             return _row_to_node(result.result_set[0][0])
         return None
 
     def remove_node(self, node_id: str) -> bool:
         result = self._q(
-            f"MATCH (n {{_id: '{_escape(node_id)}'}}) DETACH DELETE n RETURN count(n) AS c")
+            f"MATCH (n {{id: '{_escape(node_id)}'}}) DETACH DELETE n RETURN count(n) AS c")
         # FalkorDB doesn't return count on DELETE easily
         return True  # if node didn't exist, MATCH found nothing, still fine
 
@@ -205,7 +205,7 @@ class FalkorPropertyGraph:
             edge_id = f"e_{self._edge_counter}"
 
         props = dict(properties or {})
-        props["_id"] = edge_id
+        props["id"] = edge_id
         props["_source_id"] = source_id
         props["_target_id"] = target_id
 
@@ -213,7 +213,7 @@ class FalkorPropertyGraph:
         prop_str = ", ".join(f"`{k}`: {_prop_to_cypher(v)}" for k, v in props.items()
                              if v is not None)
 
-        query = (f"MATCH (a {{_id: '{_escape(source_id)}'}}), (b {{_id: '{_escape(target_id)}'}}) "
+        query = (f"MATCH (a {{id: '{_escape(source_id)}'}}), (b {{id: '{_escape(target_id)}'}}) "
                  f"CREATE (a)-[r:`{rel_type}` {{{prop_str}}}]->(b) RETURN r")
         try:
             result = self._q(query)
@@ -226,13 +226,13 @@ class FalkorPropertyGraph:
 
     def get_edge(self, edge_id: str) -> Optional[Edge]:
         result = self._q(
-            f"MATCH (a)-[r {{_id: '{_escape(edge_id)}'}}]->(b) "
-            f"RETURN r, a._id AS src, b._id AS tgt LIMIT 1")
+            f"MATCH (a)-[r {{id: '{_escape(edge_id)}'}}]->(b) "
+            f"RETURN r, a.id AS src, b.id AS tgt LIMIT 1")
         if result.result_set:
             row = result.result_set[0]
             rel = row[0]
             props = dict(rel.properties) if hasattr(rel, 'properties') else {}
-            props.pop("_id", None)
+            props.pop("id", None)
             props.pop("_source_id", None)
             props.pop("_target_id", None)
             return Edge(id=edge_id, source_id=row[1], target_id=row[2],
@@ -244,19 +244,19 @@ class FalkorPropertyGraph:
                           edge_type: Optional[str] = None) -> list[Edge]:
         if edge_type:
             rel = edge_type.replace(" ", "_").replace("-", "_")
-            query = (f"MATCH (a {{_id: '{_escape(source_id)}'}})"
+            query = (f"MATCH (a {{id: '{_escape(source_id)}'}})"
                      f"-[r:`{rel}`]->"
-                     f"(b {{_id: '{_escape(target_id)}'}}) RETURN r")
+                     f"(b {{id: '{_escape(target_id)}'}}) RETURN r")
         else:
-            query = (f"MATCH (a {{_id: '{_escape(source_id)}'}})"
+            query = (f"MATCH (a {{id: '{_escape(source_id)}'}})"
                      f"-[r]->"
-                     f"(b {{_id: '{_escape(target_id)}'}}) RETURN r")
+                     f"(b {{id: '{_escape(target_id)}'}}) RETURN r")
         result = self._q(query)
         edges = []
         for row in result.result_set:
             rel = row[0]
             props = dict(rel.properties) if hasattr(rel, 'properties') else {}
-            eid = props.pop("_id", "?")
+            eid = props.pop("id", "?")
             props.pop("_source_id", None)
             props.pop("_target_id", None)
             edges.append(Edge(id=eid, source_id=source_id, target_id=target_id,
@@ -267,17 +267,17 @@ class FalkorPropertyGraph:
     def get_outgoing(self, node_id: str, edge_type: Optional[str] = None) -> list[Edge]:
         if edge_type:
             rel = edge_type.replace(" ", "_").replace("-", "_")
-            query = (f"MATCH (a {{_id: '{_escape(node_id)}'}})-[r:`{rel}`]->(b) "
-                     f"RETURN r, b._id AS tgt")
+            query = (f"MATCH (a {{id: '{_escape(node_id)}'}})-[r:`{rel}`]->(b) "
+                     f"RETURN r, b.id AS tgt")
         else:
-            query = (f"MATCH (a {{_id: '{_escape(node_id)}'}})-[r]->(b) "
-                     f"RETURN r, b._id AS tgt")
+            query = (f"MATCH (a {{id: '{_escape(node_id)}'}})-[r]->(b) "
+                     f"RETURN r, b.id AS tgt")
         result = self._q(query)
         edges = []
         for row in result.result_set:
             rel = row[0]
             props = dict(rel.properties) if hasattr(rel, 'properties') else {}
-            eid = props.pop("_id", "?")
+            eid = props.pop("id", "?")
             props.pop("_source_id", None)
             props.pop("_target_id", None)
             edges.append(Edge(id=eid, source_id=node_id, target_id=row[1],
@@ -288,17 +288,17 @@ class FalkorPropertyGraph:
     def get_incoming(self, node_id: str, edge_type: Optional[str] = None) -> list[Edge]:
         if edge_type:
             rel = edge_type.replace(" ", "_").replace("-", "_")
-            query = (f"MATCH (a)-[r:`{rel}`]->(b {{_id: '{_escape(node_id)}'}}) "
-                     f"RETURN r, a._id AS src")
+            query = (f"MATCH (a)-[r:`{rel}`]->(b {{id: '{_escape(node_id)}'}}) "
+                     f"RETURN r, a.id AS src")
         else:
-            query = (f"MATCH (a)-[r]->(b {{_id: '{_escape(node_id)}'}}) "
-                     f"RETURN r, a._id AS src")
+            query = (f"MATCH (a)-[r]->(b {{id: '{_escape(node_id)}'}}) "
+                     f"RETURN r, a.id AS src")
         result = self._q(query)
         edges = []
         for row in result.result_set:
             rel = row[0]
             props = dict(rel.properties) if hasattr(rel, 'properties') else {}
-            eid = props.pop("_id", "?")
+            eid = props.pop("id", "?")
             props.pop("_source_id", None)
             props.pop("_target_id", None)
             edges.append(Edge(id=eid, source_id=row[1], target_id=node_id,
@@ -322,7 +322,7 @@ class FalkorPropertyGraph:
         return results
 
     def remove_edge(self, edge_id: str) -> bool:
-        self._q(f"MATCH ()-[r {{_id: '{_escape(edge_id)}'}}]->() DELETE r")
+        self._q(f"MATCH ()-[r {{id: '{_escape(edge_id)}'}}]->() DELETE r")
         return True
 
     # --------------------------------------------------------
@@ -412,7 +412,7 @@ class FalkorPropertyGraph:
         """Deterministic hash. Queries all nodes and edges sorted by _id."""
         h = hashlib.sha256()
         # Nodes
-        result = self._q("MATCH (n) RETURN n ORDER BY n._id")
+        result = self._q("MATCH (n) RETURN n ORDER BY n.id")
         for row in result.result_set:
             node = _row_to_node(row[0])
             h.update(node.id.encode())
@@ -421,17 +421,17 @@ class FalkorPropertyGraph:
                 h.update(k.encode())
                 h.update(str(node.properties[k]).encode())
         # Edges
-        result = self._q("MATCH (a)-[r]->(b) RETURN r, a._id, b._id ORDER BY r._id")
+        result = self._q("MATCH (a)-[r]->(b) RETURN r, a.id, b.id ORDER BY r.id")
         for row in result.result_set:
             rel = row[0]
             props = dict(rel.properties) if hasattr(rel, 'properties') else {}
-            eid = props.get("_id", "?")
+            eid = props.get("id", "?")
             h.update(eid.encode())
             h.update(str(row[1]).encode())
             h.update(str(row[2]).encode())
             h.update((rel.relation if hasattr(rel, 'relation') else "?").encode())
             clean = {k: v for k, v in props.items()
-                     if not k.startswith("_")}
+                     if k not in ("id","source_id","target_id","node_type","edge_type")}
             for k in sorted(clean.keys()):
                 h.update(k.encode())
                 h.update(str(clean[k]).encode())
@@ -455,12 +455,12 @@ class FalkorPropertyGraph:
     @property
     def _edges(self) -> dict:
         """Compatibility: return all edges as a dict. Use sparingly."""
-        result = self._q("MATCH (a)-[r]->(b) RETURN r, a._id, b._id")
+        result = self._q("MATCH (a)-[r]->(b) RETURN r, a.id, b.id")
         edges = {}
         for row in result.result_set:
             rel = row[0]
             props = dict(rel.properties) if hasattr(rel, 'properties') else {}
-            eid = props.pop("_id", "?")
+            eid = props.pop("id", "?")
             src = props.pop("_source_id", row[1])
             tgt = props.pop("_target_id", row[2])
             etype = rel.relation if hasattr(rel, 'relation') else "?"

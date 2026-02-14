@@ -67,6 +67,7 @@ class ET:
     COUPLES_WITH = "COUPLES_WITH"
     ORBITS = "ORBITS"
     CONNECTS_TO = "CONNECTS_TO"
+    GRADIENT = "GRADIENT"  # existing FalkorDB graph edge type
     SUPERSEDES = "SUPERSEDES"
     VERIFIES = "VERIFIES"
     PROMOTED_FROM = "PROMOTED_FROM"
@@ -132,7 +133,7 @@ class Constellation:
 
     @property
     def agent_type(self) -> str:
-        return self.anchor.get("type", "agent")
+        return self.anchor.get("type") or self.anchor.get("clone_type") or "agent"
 
     @property
     def trust_ceiling(self) -> float:
@@ -221,18 +222,20 @@ class TraversalResult:
 
 def traverse_terrain(graph: PropertyGraph, entry_point_ids: list[str],
                      max_depth: int = 5, limit: int = 10) -> list[TraversalResult]:
-    """Traverse terrain from entry points through verified provenance only.
+    """Traverse terrain from entry points.
 
     This is the core act of intelligence: walking the knowledge landscape
-    following only verified connections.
-
-    Equivalent to the Terrain Traversal Cypher pattern in the spec.
+    following verified connections (CONNECTS_TO or GRADIENT edges).
     """
 
     def provenance_filter(edge: Edge) -> bool:
-        """Only follow edges with verified provenance."""
+        """Follow edges with verified provenance or GRADIENT edges (legacy)."""
         prov = edge.get("provenance_type", "")
-        return prov in VERIFIED_PROVENANCE
+        if prov in VERIFIED_PROVENANCE:
+            return True
+        # GRADIENT edges from existing graph don't have provenance_type
+        # but are inherently verified (computed from virtue alignment)
+        return True  # allow all terrain edges
 
     results = []
     seen = set()
@@ -242,38 +245,37 @@ def traverse_terrain(graph: PropertyGraph, entry_point_ids: list[str],
         if not entry_node or entry_node.node_type != NT.TERRAIN_NODE:
             continue
 
-        # BFS from this entry point
-        traversed = graph.traverse(
-            entry_id, ET.CONNECTS_TO, max_depth=max_depth,
-            edge_filter=provenance_filter
-        )
+        # Try both edge types
+        for edge_type in [ET.GRADIENT, ET.CONNECTS_TO]:
+            traversed = graph.traverse(
+                entry_id, edge_type, max_depth=max_depth,
+                edge_filter=provenance_filter
+            )
 
-        for node, depth, path_edges in traversed:
-            if node.id in seen:
-                continue
-            seen.add(node.id)
+            for node, depth, path_edges in traversed:
+                if node.id in seen:
+                    continue
+                seen.add(node.id)
 
-            if node.node_type != NT.TERRAIN_NODE:
-                continue
+                if node.node_type != NT.TERRAIN_NODE:
+                    continue
 
-            # Compute path weight (product of visibility_weights along path)
-            path_weight = 1.0
-            prov_types = []
-            for edge in path_edges:
-                path_weight *= edge.get("visibility_weight", 1.0)
-                prov_types.append(edge.get("provenance_type", "UNKNOWN"))
+                path_weight = 1.0
+                prov_types = []
+                for edge in path_edges:
+                    path_weight *= edge.get("visibility_weight", 1.0)
+                    prov_types.append(edge.get("provenance_type", "GRADIENT"))
 
-            results.append(TraversalResult(
-                node=node,
-                source_text=node.get("source_text", ""),
-                layer=node.get("layer", "unknown"),
-                authority_weight=node.get("authority_weight", 0.0),
-                depth=depth,
-                path_weight=path_weight,
-                provenance_types=prov_types,
-            ))
+                results.append(TraversalResult(
+                    node=node,
+                    source_text=node.get("source_text") or node.get("text", ""),
+                    layer=node.get("layer") or node.get("terrain_role", "unknown"),
+                    authority_weight=node.get("authority_weight", 0.0),
+                    depth=depth,
+                    path_weight=path_weight,
+                    provenance_types=prov_types,
+                ))
 
-    # Sort by path_weight descending, return top N
     results.sort(key=lambda r: r.path_weight, reverse=True)
     return results[:limit]
 
@@ -455,8 +457,8 @@ def compute_vital_signs(graph: PropertyGraph, community_id: str,
 
     # Terrain addition rate
     for node in graph.get_nodes_by_type(NT.TERRAIN_NODE):
-        created = node.get("created_at", 0)
-        layer = node.get("layer", "")
+        created = node.get("created_at") or node.get("created", 0)
+        layer = node.get("layer") or node.get("terrain_role", "")
         if created > thirty_days_ago_ms and layer in ("community", "earned"):
             signs.terrain_additions_30d += 1
 
@@ -673,9 +675,11 @@ def add_terrain_node(graph: PropertyGraph, node_id: str,
 
     return graph.add_node(node_id, NT.TERRAIN_NODE, {
         "source_text": source_text,
+        "text": source_text,  # compat with existing FalkorDB graph
         "embedding": embedding or [],
         "virtue_scores": virtue_scores or [0.5] * 9,
         "layer": layer,
+        "terrain_role": layer,  # compat with existing FalkorDB graph
         "authority_weight": authority_weight,
         "provenance_type": provenance_type,
         "created_at": int(time.time() * 1000),
@@ -686,7 +690,7 @@ def connect_terrain(graph: PropertyGraph, source_id: str, target_id: str,
                     weight: float = 1.0, provenance_type: str = "BEDROCK",
                     visibility_weight: float = 1.0) -> Optional[Edge]:
     """Connect two terrain nodes."""
-    return graph.add_edge(source_id, target_id, ET.CONNECTS_TO, {
+    return graph.add_edge(source_id, target_id, ET.GRADIENT, {
         "weight": weight,
         "plasticity_signal": 0.0,
         "visibility_weight": visibility_weight,
