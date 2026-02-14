@@ -11,7 +11,7 @@ import json
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -610,6 +610,75 @@ async def terrain_search(req: TerrainQuery):
 
 
 # ============================================================
+# Text-based Terrain Search (embeds query via Voyage AI)
+# ============================================================
+
+class TerrainAsk(BaseModel):
+    text: str
+    top_k: int = 5
+
+@app.post("/terrain/ask")
+async def terrain_ask(req: TerrainAsk):
+    """Search terrain by text. Embeds query via Voyage AI, finds nearest nodes via vector index."""
+    import httpx as hx
+    import math
+    
+    voyage_key = os.getenv("VOYAGE_API_KEY", "")
+    if not voyage_key:
+        raise HTTPException(500, "VOYAGE_API_KEY not set")
+    
+    # Embed the query
+    async with hx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://api.voyageai.com/v1/embeddings",
+            headers={"Authorization": f"Bearer {voyage_key}", "Content-Type": "application/json"},
+            json={"input": [req.text], "model": "voyage-3.5", "input_type": "query"}
+        )
+        if resp.status_code != 200:
+            raise HTTPException(502, f"Voyage API error: {resp.text[:200]}")
+        emb_data = resp.json()
+        query_emb = emb_data["data"][0]["embedding"]
+    
+    # Use FalkorDB vector index search
+    from falkordb import FalkorDB as FDB
+    host = os.getenv("FALKORDB_HOST", "localhost")
+    port = int(os.getenv("FALKORDB_PORT", "6379"))
+    pw = os.getenv("FALKORDB_PASSWORD", "")
+    db = FDB(host=host, port=port, password=pw)
+    g = db.select_graph(os.getenv("FALKORDB_GRAPH", "graph_zero"))
+    
+    limit = min(req.top_k, 20)
+    
+    # FalkorDB vector index query
+    emb_str = "[" + ",".join(str(v) for v in query_emb) + "]"
+    try:
+        result = g.query(
+            f"CALL db.idx.vector.queryNodes('TerrainNode', 'embedding', {limit}, "
+            f"vecf32({emb_str})) "
+            f"YIELD node, score "
+            f"RETURN node._id AS id, node.source_text AS text, node.source_work AS work, "
+            f"node.layer AS layer, node.virtue_scores AS virtues, score "
+            f"ORDER BY score ASC"
+        )
+    except Exception as vec_err:
+        return {"query": req.text, "error": f"Vector search failed: {str(vec_err)[:200]}", "results": []}
+    
+    results = []
+    for row in result.result_set:
+        node_id, text, work, layer, virtues, score = row
+        results.append({
+            "id": node_id,
+            "score": round(1.0 - float(score), 4) if score is not None else 0,
+            "text": text[:300] if text else "",
+            "source_work": work,
+            "layer": layer,
+            "virtue_scores": virtues
+        })
+    
+    return {"query": req.text, "results": results}
+
+
+# ============================================================
 # Moral Geometry Endpoints
 # ============================================================
 
@@ -875,6 +944,332 @@ async def serve_dashboard():
 
 
 # ============================================================
+# Admin Endpoints
+# ============================================================
+
+@app.post("/admin/cleanup")
+async def admin_cleanup():
+    """Purge legacy duplicate TerrainNodes and reset stalled ingest job."""
+
+@app.delete("/admin/graph/{graph_name}")
+async def admin_drop_graph(graph_name: str):
+    """Drop an entire graph from FalkorDB. Cannot drop graph_zero."""
+    if graph_name == "graph_zero":
+        return {"error": "Cannot drop the active graph"}
+    import redis
+    host = os.getenv("FALKORDB_HOST", "localhost")
+    port = int(os.getenv("FALKORDB_PORT", "6379"))
+    pw = os.getenv("FALKORDB_PASSWORD", "")
+    r = redis.Redis(host=host, port=port, password=pw)
+    try:
+        r.execute_command("GRAPH.DELETE", graph_name)
+        return {"dropped": graph_name}
+    except Exception as e:
+        return {"error": str(e)}
+    from falkordb import FalkorDB as FDB
+    host = os.getenv("FALKORDB_HOST", "localhost")
+    port = int(os.getenv("FALKORDB_PORT", "6379"))
+    pw = os.getenv("FALKORDB_PASSWORD", "")
+    
+    log = []
+    try:
+        db = FDB(host=host, port=port, password=pw)
+        g = db.select_graph("graph_zero")
+        
+        # Count before
+        r = g.query("MATCH (n:TerrainNode) RETURN count(n)")
+        before = r.result_set[0][0] if r.result_set else 0
+        log.append(f"Before cleanup: {before} TerrainNodes")
+        
+        # Delete legacy dupes: nodes with terrain_role but no _id starting with 'gz_'
+        # These are from the botched migration - source_work = 'from a Tablet...'
+        r_legacy = g.query("MATCH (n:TerrainNode) WHERE n.source_work = 'from a Tablet - translated from the Persian' RETURN count(n)")
+        legacy_count = r_legacy.result_set[0][0] if r_legacy.result_set else 0
+        
+        if legacy_count > 100:
+            # Delete in batches to avoid timeout
+            deleted = 0
+            for _ in range(100):
+                g.query("MATCH (n:TerrainNode) WHERE n.source_work = 'from a Tablet - translated from the Persian' WITH n LIMIT 500 DETACH DELETE n")
+                r_check = g.query("MATCH (n:TerrainNode) WHERE n.source_work = 'from a Tablet - translated from the Persian' RETURN count(n)")
+                remaining = r_check.result_set[0][0] if r_check.result_set else 0
+                deleted = legacy_count - remaining
+                if remaining == 0:
+                    break
+            log.append(f"Deleted {deleted} legacy duplicates ('from a Tablet...')")
+        elif legacy_count > 0:
+            g.query("MATCH (n:TerrainNode) WHERE n.source_work = 'from a Tablet - translated from the Persian' DETACH DELETE n")
+            log.append(f"Deleted {legacy_count} legacy duplicates")
+        else:
+            log.append("No legacy duplicates found")
+        
+        # Also clean other known legacy stragglers (old schema nodes without proper _id)
+        old_schemas = [
+            "MATCH (n:TerrainNode) WHERE n._id STARTS WITH 'legacy_' DETACH DELETE n",
+        ]
+        for q in old_schemas:
+            try:
+                g.query(q)
+            except:
+                pass
+        
+        # Count after
+        r2 = g.query("MATCH (n:TerrainNode) RETURN count(n)")
+        after = r2.result_set[0][0] if r2.result_set else 0
+        log.append(f"After cleanup: {after} TerrainNodes")
+        log.append(f"Removed: {before - after} total")
+        
+        # Reset stalled ingest flag
+        app._ingest_running = False
+        if hasattr(app, '_ingest_result'):
+            if app._ingest_result.get("status") == "running":
+                app._ingest_result["status"] = "reset"
+        log.append("Reset ingest job flag")
+        
+        return {"before": before, "after": after, "removed": before - after, "log": log}
+    except Exception as e:
+        return {"error": str(e), "log": log}
+
+
+@app.get("/admin/ingest/sources")
+async def list_ingest_sources(use_fallback: bool = False):
+    """List available sources for ingestion."""
+    from ingest import SOURCES, FALLBACK_SOURCES
+    sources = FALLBACK_SOURCES if use_fallback else SOURCES
+    return {
+        "count": len(sources),
+        "sources": [
+            {"index": i, "work": s[0], "author": s[1], "role": s[2]}
+            for i, s in enumerate(sources)
+        ]
+    }
+
+
+@app.post("/admin/ingest")
+async def ingest_terrain_endpoint(
+    source_index: int = -1,
+    embed_model: str = "voyage-3.5",
+    embed_dims: int = 1024,
+    score_model: str = "llama-3.1-8b-instant",
+    use_fallback: bool = False,
+):
+    """
+    Ingest Bahá'í sacred texts as bedrock terrain.
+    Runs in background thread. Check /admin/ingest/status for progress.
+    
+    - source_index=-1: ingest ALL sources
+    - source_index=0..N: ingest a specific source
+    - use_fallback=true: use bahai-library.com instead of bahai.org
+    """
+    from ingest import SOURCES, FALLBACK_SOURCES
+    import threading
+    
+    voyage_key = os.getenv("VOYAGE_API_KEY", "")
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    
+    if not voyage_key:
+        return {"error": "VOYAGE_API_KEY not set"}
+    if not groq_key:
+        return {"error": "GROQ_API_KEY not set"}
+    
+    if getattr(app, '_ingest_running', False):
+        return {"status": "already_running", "check": "/admin/ingest/status"}
+    
+    sources = FALLBACK_SOURCES if use_fallback else SOURCES
+    
+    if source_index >= 0 and source_index >= len(sources):
+        return {"error": f"source_index {source_index} out of range (max {len(sources)-1})"}
+    
+    app._ingest_running = True
+    app._ingest_result = {
+        "status": "running",
+        "started": time.time(),
+        "source_index": source_index,
+        "progress": [],
+    }
+    
+    def _run():
+        import asyncio
+        from ingest import ingest_all, ingest_source
+        from falkordb import FalkorDB as FDB
+        
+        try:
+            host = os.getenv("FALKORDB_HOST", "localhost")
+            port = int(os.getenv("FALKORDB_PORT", "6379"))
+            pw = os.getenv("FALKORDB_PASSWORD", "")
+            db = FDB(host=host, port=port, password=pw)
+            graph = db.select_graph("graph_zero")
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            if source_index >= 0:
+                src = sources[source_index]
+                result = loop.run_until_complete(ingest_source(
+                    src[0], src[1], src[2], src[3],
+                    graph, voyage_key, groq_key,
+                    embed_model, embed_dims, score_model
+                ))
+                app._ingest_result.update(result)
+            else:
+                result = loop.run_until_complete(ingest_all(
+                    graph, voyage_key, groq_key, sources,
+                    embed_model, embed_dims, score_model
+                ))
+                app._ingest_result.update(result)
+            
+            loop.close()
+            app._ingest_result["status"] = "complete"
+            app._ingest_result["duration_sec"] = round(time.time() - app._ingest_result["started"], 1)
+            
+        except Exception as e:
+            import traceback
+            app._ingest_result["status"] = "error"
+            app._ingest_result["error"] = str(e)
+            app._ingest_result["traceback"] = traceback.format_exc()
+        finally:
+            app._ingest_running = False
+    
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    
+    target = sources[source_index][0] if source_index >= 0 else f"all {len(sources)} sources"
+    return {"status": "started", "target": target, "check": "/admin/ingest/status"}
+
+
+@app.get("/admin/ingest/status")
+async def ingest_status():
+    """Current ingest job status + terrain statistics."""
+    from falkordb import FalkorDB as FDB
+    result = {}
+    
+    # Background job status
+    if hasattr(app, '_ingest_result'):
+        r = app._ingest_result.copy()
+        r["running"] = getattr(app, '_ingest_running', False)
+        if r.get("started"):
+            r["elapsed_sec"] = round(time.time() - r["started"], 1)
+        r.pop("results", None)
+        result["job"] = r
+    else:
+        result["job"] = {"status": "never_run"}
+    
+    # Terrain stats
+    host = os.getenv("FALKORDB_HOST", "localhost")
+    port = int(os.getenv("FALKORDB_PORT", "6379"))
+    pw = os.getenv("FALKORDB_PASSWORD", "")
+    try:
+        db = FDB(host=host, port=port, password=pw)
+        g = db.select_graph("graph_zero")
+        total = g.query("MATCH (n:TerrainNode) RETURN count(n)").result_set[0][0]
+        by_source = g.query(
+            "MATCH (n:TerrainNode) WHERE n.source_work IS NOT NULL "
+            "RETURN n.source_work AS work, count(n) AS c ORDER BY c DESC"
+        ).result_set
+        with_emb = g.query(
+            "MATCH (n:TerrainNode) WHERE n.embedding IS NOT NULL RETURN count(n)"
+        ).result_set[0][0]
+        result["terrain"] = {
+            "total": total,
+            "with_embeddings": with_emb,
+            "by_source": {r[0]: r[1] for r in by_source},
+        }
+    except Exception as e:
+        result["terrain"] = {"error": str(e)}
+    return result
+
+
+# ============================================================
+# Ingest Pipeline (background tasks)
+# ============================================================
+
+# In-memory job status tracker
+_ingest_jobs: dict = {}
+
+@app.post("/admin/ingest/{work_id}")
+async def admin_ingest_work(work_id: str, skip_virtues: bool = False,
+                            background_tasks: BackgroundTasks = None):
+    """Ingest a single Bahá'í sacred text. Runs in background, poll /admin/ingest-status/{job_id}."""
+    from graph_zero.ingest.pipeline import WORKS
+    
+    if work_id == "list":
+        return {"available_works": {k: {"title": v["title"], "author": v["author"]} 
+                for k, v in WORKS.items()}}
+    
+    if work_id not in WORKS:
+        return {"error": f"Unknown work: {work_id}", "available": list(WORKS.keys())}
+    
+    voyage_key = os.getenv("VOYAGE_API_KEY", "")
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    
+    if not voyage_key:
+        return {"error": "VOYAGE_API_KEY not set"}
+    
+    import uuid, asyncio
+    job_id = str(uuid.uuid4())[:8]
+    _ingest_jobs[job_id] = {"status": "started", "work_id": work_id, "started": time.time()}
+    
+    async def _run():
+        from graph_zero.ingest.pipeline import ingest_work
+        try:
+            result = await ingest_work(work_id, graph, voyage_key, groq_key, skip_virtues)
+            _ingest_jobs[job_id] = result
+        except Exception as e:
+            _ingest_jobs[job_id] = {"status": "error", "error": str(e)}
+    
+    asyncio.ensure_future(_run())
+    return {"job_id": job_id, "status": "started", "work_id": work_id,
+            "poll": f"/admin/ingest-status/{job_id}"}
+
+@app.get("/admin/ingest-status/{job_id}")
+async def admin_ingest_status(job_id: str):
+    """Poll ingest job status."""
+    if job_id not in _ingest_jobs:
+        return {"error": "Unknown job_id"}
+    return _ingest_jobs[job_id]
+
+@app.post("/admin/ingest-all")
+async def admin_ingest_all(skip_virtues: bool = False):
+    """Ingest all Bahá'í sacred texts in background."""
+    from graph_zero.ingest.pipeline import WORKS
+    
+    voyage_key = os.getenv("VOYAGE_API_KEY", "")
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    
+    if not voyage_key:
+        return {"error": "VOYAGE_API_KEY not set"}
+    
+    import uuid, asyncio
+    job_id = str(uuid.uuid4())[:8]
+    _ingest_jobs[job_id] = {"status": "started", "works": list(WORKS.keys()),
+                            "started": time.time(), "progress": {}}
+    
+    async def _run_all():
+        from graph_zero.ingest.pipeline import ingest_work, WORKS
+        total_stored = 0
+        for wid in WORKS:
+            _ingest_jobs[job_id]["current"] = wid
+            try:
+                result = await ingest_work(wid, graph, voyage_key, groq_key, skip_virtues)
+                _ingest_jobs[job_id]["progress"][wid] = {
+                    "status": result.get("status", "unknown"),
+                    "stored": result.get("stored", 0),
+                    "chunks": result.get("chunks", 0),
+                }
+                total_stored += result.get("stored", 0)
+            except Exception as e:
+                _ingest_jobs[job_id]["progress"][wid] = {"status": "error", "error": str(e)}
+        
+        _ingest_jobs[job_id]["status"] = "complete"
+        _ingest_jobs[job_id]["total_stored"] = total_stored
+        _ingest_jobs[job_id]["elapsed"] = round(time.time() - _ingest_jobs[job_id]["started"], 1)
+    
+    asyncio.ensure_future(_run_all())
+    return {"job_id": job_id, "status": "started", "works": len(WORKS),
+            "poll": f"/admin/ingest-status/{job_id}"}
+
+
+# ============================================================
 # Run
 # ============================================================
 
@@ -883,653 +1278,3 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
 
-@app.post("/falkordb/query")
-async def falkordb_raw_query(body: dict):
-    """Run a raw Cypher query against any graph. For schema discovery."""
-    import redis
-    host = os.getenv("FALKORDB_HOST", "localhost")
-    port = int(os.getenv("FALKORDB_PORT", "6379"))
-    pw = os.getenv("FALKORDB_PASSWORD", "")
-    graph_name = body.get("graph", "FalkorDB")
-    query = body.get("query", "RETURN 1")
-    
-    r = redis.Redis(host=host, port=port, password=pw, decode_responses=False)
-    try:
-        result = r.execute_command("GRAPH.QUERY", graph_name, query)
-        # Parse result - result[0] is header, result[1] is data
-        headers = [h.decode() if isinstance(h, bytes) else str(h) for h in (result[0] if result else [])]
-        rows = []
-        for row in (result[1] if len(result) > 1 else []):
-            parsed_row = []
-            for cell in row:
-                if isinstance(cell, bytes):
-                    parsed_row.append(cell.decode())
-                elif isinstance(cell, list):
-                    # Node or relationship - extract properties
-                    parsed_row.append(str(cell)[:500])
-                else:
-                    parsed_row.append(cell)
-            rows.append(parsed_row)
-        return {"headers": headers, "rows": rows[:50], "total_rows": len(result[1]) if len(result) > 1 else 0}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.get("/falkordb/sample/{graph_name}/{label}")
-async def falkordb_sample(graph_name: str, label: str, limit: int = 3):
-    """Sample nodes from any graph/label to inspect schema."""
-    from falkordb import FalkorDB as FDB
-    host = os.getenv("FALKORDB_HOST", "localhost")
-    port = int(os.getenv("FALKORDB_PORT", "6379"))
-    pw = os.getenv("FALKORDB_PASSWORD", "")
-    try:
-        db = FDB(host=host, port=port, password=pw)
-        g = db.select_graph(graph_name)
-        result = g.query(f"MATCH (n:`{label}`) RETURN n LIMIT {min(limit,5)}")
-        samples = []
-        for row in result.result_set:
-            node = row[0]
-            props = {}
-            for k, v in node.properties.items():
-                if isinstance(v, (list,)) and len(v) > 10:
-                    props[k] = f"[vector: {len(v)} dims, first3={v[:3]}]"
-                elif isinstance(v, str) and len(v) > 300:
-                    props[k] = v[:300] + f"... ({len(v)} total chars)"
-                else:
-                    props[k] = v
-            samples.append({"labels": list(node.labels), "properties": props})
-        return {"graph": graph_name, "label": label, "count": len(samples), "samples": samples}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.get("/falkordb/schema/{graph_name}/{label}")
-async def falkordb_schema(graph_name: str, label: str):
-    """Get property keys and types for a label."""
-    from falkordb import FalkorDB as FDB
-    host = os.getenv("FALKORDB_HOST", "localhost")
-    port = int(os.getenv("FALKORDB_PORT", "6379"))
-    pw = os.getenv("FALKORDB_PASSWORD", "")
-    try:
-        db = FDB(host=host, port=port, password=pw)
-        g = db.select_graph(graph_name)
-        result = g.query(f"MATCH (n:`{label}`) RETURN n LIMIT 1")
-        if not result.result_set:
-            return {"graph": graph_name, "label": label, "properties": {}}
-        node = result.result_set[0][0]
-        schema = {}
-        for k, v in node.properties.items():
-            if isinstance(v, list):
-                schema[k] = f"list[{type(v[0]).__name__ if v else '?'}] len={len(v)}"
-            else:
-                schema[k] = type(v).__name__
-        # Count total
-        count_r = g.query(f"MATCH (n:`{label}`) RETURN count(n)")
-        total = count_r.result_set[0][0] if count_r.result_set else 0
-        return {"graph": graph_name, "label": label, "total": total, "properties": schema}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.get("/falkordb/query/{graph_name}")
-async def falkordb_query(graph_name: str, q: str, limit: int = 20):
-    """Run a read-only Cypher query against any graph."""
-    from falkordb import FalkorDB as FDB
-    if any(kw in q.upper() for kw in ["DELETE", "SET ", "CREATE", "MERGE", "REMOVE", "DROP"]):
-        return {"error": "Read-only queries only"}
-    host = os.getenv("FALKORDB_HOST", "localhost")
-    port = int(os.getenv("FALKORDB_PORT", "6379"))
-    pw = os.getenv("FALKORDB_PASSWORD", "")
-    try:
-        db = FDB(host=host, port=port, password=pw)
-        g = db.select_graph(graph_name)
-        result = g.query(q)
-        rows = []
-        for row in result.result_set[:limit]:
-            r = []
-            for val in row:
-                if hasattr(val, 'properties'):
-                    r.append({"type": "node", "labels": list(val.labels),
-                              "id_prop": val.properties.get("id", "?")})
-                elif hasattr(val, 'relation'):
-                    r.append({"type": "edge", "relation": val.relation})
-                else:
-                    r.append(val)
-            rows.append(r)
-        return {"query": q, "rows": len(rows), "results": rows}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.post("/admin/migrate")
-async def migrate_terrain():
-    """Migrate TerrainNodes from legacy FalkorDB graph to graph_zero.
-    
-    1. Wipes bad duplicates from graph_zero
-    2. Reads all TerrainNodes from legacy FalkorDB graph
-    3. Deduplicates by text content
-    4. Maps schema: courage→compassion, text→source_text, individual virtues→array
-    5. Writes to graph_zero with proper _id
-    """
-    from falkordb import FalkorDB as FDB
-    import hashlib, time
-    
-    host = os.getenv("FALKORDB_HOST", "localhost")
-    port = int(os.getenv("FALKORDB_PORT", "6379"))
-    pw = os.getenv("FALKORDB_PASSWORD", "")
-    
-    try:
-        db = FDB(host=host, port=port, password=pw)
-        legacy = db.select_graph("FalkorDB")
-        target = db.select_graph("graph_zero")
-        
-        log = []
-        
-        # Step 1: Count existing terrain in graph_zero
-        r = target.query("MATCH (n:TerrainNode) RETURN count(n)")
-        existing = r.result_set[0][0] if r.result_set else 0
-        log.append(f"Existing TerrainNodes in graph_zero: {existing}")
-        
-        # Step 2: Wipe TerrainNodes that came from botched migration (have terrain_role)
-        target.query("MATCH (n:TerrainNode) WHERE n.terrain_role IS NOT NULL DETACH DELETE n")
-        r2 = target.query("MATCH (n:TerrainNode) RETURN count(n)")
-        remaining = r2.result_set[0][0] if r2.result_set else 0
-        log.append(f"After wiping migrated dupes: {remaining} TerrainNodes remain (our originals)")
-        
-        # Step 3: Read ALL TerrainNodes from legacy in batches
-        batch_size = 100
-        offset = 0
-        all_legacy = []
-        while True:
-            r = legacy.query(f"MATCH (n:TerrainNode) RETURN n SKIP {offset} LIMIT {batch_size}")
-            if not r.result_set:
-                break
-            for row in r.result_set:
-                node = row[0]
-                all_legacy.append(node.properties)
-            if len(r.result_set) < batch_size:
-                break
-            offset += batch_size
-        
-        log.append(f"Read {len(all_legacy)} TerrainNodes from legacy FalkorDB graph")
-        
-        # Step 4: Deduplicate by text content
-        seen_texts = {}
-        unique_nodes = []
-        dupes = 0
-        for props in all_legacy:
-            text = props.get("text", "")
-            if not text:
-                continue
-            text_hash = hashlib.sha256(text.encode()).hexdigest()[:16]
-            if text_hash in seen_texts:
-                dupes += 1
-                continue
-            seen_texts[text_hash] = True
-            unique_nodes.append(props)
-        
-        log.append(f"Deduplicated: {len(unique_nodes)} unique, {dupes} duplicates removed")
-        
-        # Step 5: Migrate with schema mapping
-        # Legacy virtues: unity, justice, truthfulness, love, detachment, humility, service, courage, wisdom
-        # Graph Zero:     unity, justice, truthfulness, love, detachment, humility, compassion, wisdom, service
-        # Mapping: courage→compassion, reorder: service moves to end, wisdom stays at 8
-        
-        VIRTUE_MAP = [
-            "virtue_unity",        # 0 → 0
-            "virtue_justice",      # 1 → 1  
-            "virtue_truthfulness", # 2 → 2
-            "virtue_love",         # 3 → 3
-            "virtue_detachment",   # 4 → 4
-            "virtue_humility",     # 5 → 5
-            "virtue_courage",      # courage → compassion (index 6)
-            "virtue_wisdom",       # 7 → wisdom (index 7)
-            "virtue_service",      # 6 → service (index 8)
-        ]
-        
-        MOMENTUM_MAP = [
-            "momentum_unity",
-            "momentum_justice",
-            "momentum_truthfulness",
-            "momentum_love",
-            "momentum_detachment",
-            "momentum_humility",
-            "momentum_courage",
-            "momentum_wisdom",
-            "momentum_service",
-        ]
-        
-        migrated = 0
-        errors = 0
-        
-        for props in unique_nodes:
-            try:
-                text = props.get("text", "")
-                source_work = props.get("source_work", "")
-                author = props.get("author", "")
-                terrain_role = props.get("terrain_role", "community")
-                chunk_id = props.get("chunk_id", props.get("id", ""))
-                
-                # Generate stable _id from text hash
-                node_id = f"legacy_{hashlib.sha256(text.encode()).hexdigest()[:12]}"
-                
-                # Map terrain_role to layer
-                layer_map = {"bedrock": "bedrock", "living": "community", "community": "community", "earned": "earned", "personal": "personal"}
-                layer = layer_map.get(terrain_role, "community")
-                
-                # Extract virtue scores in Graph Zero order
-                virtue_scores = []
-                for vkey in VIRTUE_MAP:
-                    virtue_scores.append(float(props.get(vkey, 0.5)))
-                
-                # Extract momentum
-                momentum = []
-                for mkey in MOMENTUM_MAP:
-                    momentum.append(float(props.get(mkey, 0.0)))
-                
-                # Embedding
-                embedding = props.get("embedding", [])
-                
-                kala = float(props.get("kala_accumulated", 0.0))
-                traversals = int(props.get("traversal_count", 0))
-                
-                # Provenance
-                if terrain_role == "bedrock":
-                    prov = "BEDROCK"
-                elif author:
-                    prov = "CROSS_VERIFIED"
-                else:
-                    prov = "WITNESS"
-                
-                # Build SET clause manually for complex data
-                # Can't use parameterized queries with lists in FalkorDB easily
-                # So we MERGE by _id and set all props
-                
-                # Escape text for Cypher
-                safe_text = text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ").replace("\r", "")
-                safe_source = source_work.replace("\\", "\\\\").replace("'", "\\'")
-                safe_author = author.replace("\\", "\\\\").replace("'", "\\'")
-                
-                vs_str = "[" + ",".join(str(v) for v in virtue_scores) + "]"
-                mom_str = "[" + ",".join(str(m) for m in momentum) + "]"
-                
-                q = (
-                    f"MERGE (n:TerrainNode {{_id: '{node_id}'}}) "
-                    f"SET n.source_text = '{safe_text}', "
-                    f"n.text = '{safe_text}', "
-                    f"n.source_work = '{safe_source}', "
-                    f"n.author = '{safe_author}', "
-                    f"n.layer = '{layer}', "
-                    f"n.terrain_role = '{terrain_role}', "
-                    f"n.provenance_type = '{prov}', "
-                    f"n.virtue_scores = {vs_str}, "
-                    f"n.momentum = {mom_str}, "
-                    f"n.kala_accumulated = {kala}, "
-                    f"n.traversal_count = {traversals}, "
-                    f"n.authority_weight = 0.5, "
-                    f"n.chunk_id = '{chunk_id}', "
-                    f"n.created_at = {int(time.time() * 1000)}"
-                )
-                
-                target.query(q)
-                
-                # Embedding stored separately (too large for inline Cypher)
-                if embedding and len(embedding) > 0:
-                    # Store embedding dimensions as a property
-                    target.query(f"MATCH (n:TerrainNode {{_id: '{node_id}'}}) SET n.embedding_dims = {len(embedding)}")
-                    # FalkorDB can handle list properties but large ones need special handling
-                    # For now store the embedding via the list syntax
-                    if len(embedding) <= 2000:
-                        emb_str = "[" + ",".join(str(e) for e in embedding) + "]"
-                        target.query(f"MATCH (n:TerrainNode {{_id: '{node_id}'}}) SET n.embedding = {emb_str}")
-                
-                migrated += 1
-                if migrated % 100 == 0:
-                    log.append(f"  Migrated {migrated}/{len(unique_nodes)}...")
-                    
-            except Exception as e:
-                errors += 1
-                if errors <= 5:
-                    log.append(f"  Error on node: {str(e)[:100]}")
-        
-        # Step 6: Final count
-        r_final = target.query("MATCH (n:TerrainNode) RETURN count(n)")
-        final_count = r_final.result_set[0][0] if r_final.result_set else 0
-        
-        log.append(f"Migration complete: {migrated} migrated, {errors} errors, {final_count} total TerrainNodes")
-        
-        return {
-            "status": "complete",
-            "legacy_total": len(all_legacy),
-            "unique": len(unique_nodes),
-            "duplicates_removed": dupes,
-            "migrated": migrated,
-            "errors": errors,
-            "final_terrain_count": final_count,
-            "log": log
-        }
-        
-    except Exception as e:
-        return {"error": str(e), "log": log if 'log' in dir() else []}
-
-@app.post("/migrate/terrain")
-async def migrate_terrain(batch_size: int = 100, offset: int = 0, dry_run: bool = False):
-    """Migration already complete — 8740 nodes present. Use /migrate/vector-index instead."""
-    return {
-        "status": "already_migrated",
-        "terrain_nodes": 8744,
-        "message": "TerrainNodes already present in graph_zero. Use POST /migrate/vector-index to create vector search index."
-    }
-
-@app.post("/migrate/vector-index")
-async def create_vector_index():
-    """Create a vector index on TerrainNode embeddings for fast similarity search."""
-    from falkordb import FalkorDB as FDB
-    host = os.getenv("FALKORDB_HOST", "localhost")
-    port = int(os.getenv("FALKORDB_PORT", "6379"))
-    pw = os.getenv("FALKORDB_PASSWORD", "")
-    try:
-        db = FDB(host=host, port=port, password=pw)
-        gz = db.select_graph("graph_zero")
-        
-        # Create vector index: 1536 dims (OpenAI ada-002), cosine similarity
-        gz.query("""
-            CREATE VECTOR INDEX FOR (n:TerrainNode) ON (n.embedding) 
-            OPTIONS {dim: 1536, similarityFunction: 'cosine'}
-        """)
-        
-        # Verify
-        indexes = gz.query("CALL db.indexes()")
-        vector_found = False
-        for row in indexes.result_set:
-            if 'VECTOR' in str(row):
-                vector_found = True
-                break
-        
-        return {
-            "status": "created",
-            "index": "TerrainNode.embedding",
-            "dimensions": 1536,
-            "similarity": "cosine",
-            "verified": vector_found
-        }
-    except Exception as e:
-        err = str(e)
-        if "already" in err.lower() or "exist" in err.lower():
-            return {"status": "already_exists", "message": err}
-        return {"error": err}
-
-@app.post("/terrain/vector-search")
-async def terrain_vector_search(query_embedding: list[float] = None,
-                                 query_text: str = None, limit: int = 10):
-    """Search terrain using FalkorDB native vector index. Fast."""
-    from falkordb import FalkorDB as FDB
-    host = os.getenv("FALKORDB_HOST", "localhost")
-    port = int(os.getenv("FALKORDB_PORT", "6379"))
-    pw = os.getenv("FALKORDB_PASSWORD", "")
-    
-    if not query_embedding:
-        return {"error": "query_embedding required (1536 floats)"}
-    
-    try:
-        db = FDB(host=host, port=port, password=pw)
-        gz = db.select_graph("graph_zero")
-        
-        # Use FalkorDB vector query
-        emb_str = ",".join(str(f) for f in query_embedding)
-        result = gz.query(f"""
-            CALL db.idx.vector.queryNodes('TerrainNode', 'embedding', {limit}, 
-                vecf32([{emb_str}]))
-            YIELD node, score
-            RETURN node._id AS id, 
-                   node.text AS text, 
-                   node.source_text AS source_text,
-                   node.source_work AS source_work,
-                   node.author AS author,
-                   node.layer AS layer,
-                   node.terrain_role AS terrain_role,
-                   score
-            ORDER BY score ASC
-        """)
-        
-        results = []
-        for row in result.result_set:
-            results.append({
-                "node_id": row[0],
-                "text": row[1] or row[2] or "",
-                "source_work": row[3] or "",
-                "author": row[4] or "",
-                "layer": row[5] or row[6] or "community",
-                "score": row[7],
-            })
-        
-        return {"query_dims": len(query_embedding), "results": results}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.post("/falkordb/migrate")
-async def migrate_legacy_terrain(batch_size: int = 100, dry_run: bool = False):
-    """Migrate TerrainNodes from legacy FalkorDB graph into graph_zero.
-    
-    Schema mapping:
-      legacy.id -> graph_zero._id  
-      legacy.text -> source_text property
-      legacy.source_work -> source_work property
-      legacy.author -> author property
-      legacy.terrain_role -> layer (bedrock->bedrock, living->community)
-      legacy.virtue_* -> stored as virtue position properties
-      legacy.momentum_* -> stored as momentum properties
-      legacy.kala_accumulated -> kala_accumulated property
-      legacy.traversal_count -> traversal_count property
-      legacy.embedding (1536d) -> embedding property
-      legacy.courage -> mapped to compassion index
-    
-    Provenance: BEDROCK for bedrock, COMMUNITY_CONSENSUS for living terrain.
-    """
-    from falkordb import FalkorDB as FDB
-    import time
-    
-    host = os.getenv("FALKORDB_HOST", "localhost")
-    port = int(os.getenv("FALKORDB_PORT", "6379"))
-    pw = os.getenv("FALKORDB_PASSWORD", "")
-    
-    db = FDB(host=host, port=port, password=pw)
-    legacy = db.select_graph("FalkorDB")
-    target = db.select_graph("graph_zero")
-    
-    VIRTUE_MAP = {
-        "virtue_unity": 0, "virtue_justice": 1, "virtue_truthfulness": 2,
-        "virtue_love": 3, "virtue_detachment": 4, "virtue_humility": 5,
-        "virtue_courage": 6,  # maps to compassion slot
-        "virtue_wisdom": 7, "virtue_service": 8,
-    }
-    MOMENTUM_MAP = {
-        "momentum_unity": 0, "momentum_justice": 1, "momentum_truthfulness": 2,
-        "momentum_love": 3, "momentum_detachment": 4, "momentum_humility": 5,
-        "momentum_courage": 6, "momentum_wisdom": 7, "momentum_service": 8,
-    }
-    LAYER_MAP = {"bedrock": "bedrock", "living": "community"}
-    PROV_MAP = {"bedrock": "BEDROCK", "living": "COMMUNITY_CONSENSUS"}
-    
-    # Count total
-    count_r = legacy.query("MATCH (n:TerrainNode) RETURN count(n)")
-    total = count_r.result_set[0][0]
-    
-    if dry_run:
-        return {"status": "dry_run", "total_legacy_nodes": total, "batch_size": batch_size}
-    
-    migrated = 0
-    skipped = 0
-    errors = []
-    start = time.time()
-    offset = 0
-    
-    while offset < total:
-        # Batch read from legacy
-        batch_r = legacy.query(
-            f"MATCH (n:TerrainNode) RETURN n ORDER BY n.id SKIP {offset} LIMIT {batch_size}")
-        
-        if not batch_r.result_set:
-            break
-        
-        for row in batch_r.result_set:
-            node = row[0]
-            props = node.properties
-            node_id = props.get("id", f"legacy_{offset}_{migrated}")
-            
-            # Check if already migrated
-            exists_r = target.query(
-                f"MATCH (n:TerrainNode {{_id: '{node_id}'}}) RETURN count(n)")
-            if exists_r.result_set and exists_r.result_set[0][0] > 0:
-                skipped += 1
-                continue
-            
-            # Build virtue position [9]
-            virtues = [0.5] * 9
-            for vk, vi in VIRTUE_MAP.items():
-                val = props.get(vk)
-                if val is not None:
-                    virtues[vi] = float(val)
-            
-            # Build momentum [9]
-            momenta = [0.0] * 9
-            for mk, mi in MOMENTUM_MAP.items():
-                val = props.get(mk)
-                if val is not None:
-                    momenta[mi] = float(val)
-            
-            text = props.get("text", "")
-            source_work = props.get("source_work", "")
-            author = props.get("author", "")
-            terrain_role = props.get("terrain_role", "living")
-            layer = LAYER_MAP.get(terrain_role, "community")
-            prov = PROV_MAP.get(terrain_role, "COMMUNITY_CONSENSUS")
-            kala = float(props.get("kala_accumulated", 0))
-            traversals = int(props.get("traversal_count", 0))
-            chunk_id = props.get("chunk_id", "")
-            embedding = props.get("embedding", [])
-            
-            # Escape text for Cypher
-            safe_text = text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ")
-            safe_work = source_work.replace("\\", "\\\\").replace("'", "\\'")
-            safe_author = author.replace("\\", "\\\\").replace("'", "\\'")
-            safe_chunk = chunk_id.replace("\\", "\\\\").replace("'", "\\'")
-            
-            # Build the Cypher CREATE
-            try:
-                # Create node with all properties
-                virtue_str = str(virtues)
-                momentum_str = str(momenta)
-                
-                q = (f"CREATE (n:TerrainNode {{"
-                     f"_id: '{node_id}', "
-                     f"source_text: '{safe_text}', "
-                     f"source_work: '{safe_work}', "
-                     f"author: '{safe_author}', "
-                     f"chunk_id: '{safe_chunk}', "
-                     f"layer: '{layer}', "
-                     f"provenance: '{prov}', "
-                     f"virtue_position: {virtue_str}, "
-                     f"momentum: {momentum_str}, "
-                     f"kala_accumulated: {kala}, "
-                     f"traversal_count: {traversals}, "
-                     f"authority_weight: 1.0"
-                     f"}})")
-                
-                target.query(q)
-                
-                # Store embedding separately (large vector)
-                if embedding and len(embedding) > 0:
-                    # FalkorDB can store lists as properties
-                    emb_str = str(embedding)
-                    target.query(
-                        f"MATCH (n:TerrainNode {{_id: '{node_id}'}}) "
-                        f"SET n.embedding = {emb_str}")
-                
-                # Connect to community node
-                target.query(
-                    f"MATCH (n:TerrainNode {{_id: '{node_id}'}}), "
-                    f"(c:Community {{_id: 'lower_puna'}}) "
-                    f"CREATE (n)-[:MEMBER_OF {{provenance: '{prov}'}}]->(c)")
-                
-                migrated += 1
-                
-            except Exception as e:
-                errors.append({"node_id": node_id, "error": str(e)[:200]})
-                if len(errors) > 50:
-                    break
-        
-        offset += batch_size
-        
-        # Progress check
-        if migrated % 500 == 0 and migrated > 0:
-            elapsed = time.time() - start
-            rate = migrated / elapsed
-            print(f"  Migration: {migrated}/{total} ({rate:.0f}/s), skipped {skipped}, errors {len(errors)}")
-    
-    elapsed = time.time() - start
-    
-    # Final count
-    final_r = target.query("MATCH (n:TerrainNode) RETURN count(n)")
-    final_count = final_r.result_set[0][0] if final_r.result_set else 0
-    
-    return {
-        "status": "complete",
-        "total_legacy": total,
-        "migrated": migrated,
-        "skipped": skipped,
-        "errors": len(errors),
-        "error_samples": errors[:10],
-        "elapsed_seconds": round(elapsed, 1),
-        "graph_zero_terrain_nodes": final_count,
-        "rate_per_second": round(migrated / max(elapsed, 0.1), 1),
-    }
-
-@app.post("/admin/migrate")
-async def run_migration(dry_run: bool = False):
-    """Migrate legacy FalkorDB graph data into graph_zero."""
-    from falkordb import FalkorDB as FDB
-    from migrate import migrate_terrain, migrate_agents
-
-    host = os.getenv("FALKORDB_HOST", "localhost")
-    port = int(os.getenv("FALKORDB_PORT", "6379"))
-    pw = os.getenv("FALKORDB_PASSWORD", "")
-
-    try:
-        db = FDB(host=host, port=port, password=pw)
-        legacy = db.select_graph("FalkorDB")
-        gz = db.select_graph("graph_zero")
-
-        results = {"dry_run": dry_run}
-
-        if dry_run:
-            # Just count what would be migrated
-            t_count = legacy.query("MATCH (n:TerrainNode) RETURN count(n)").result_set[0][0]
-            a_count = legacy.query("MATCH (n:Agent) RETURN count(n)").result_set[0][0]
-            gz_t = gz.query("MATCH (n:TerrainNode) RETURN count(n)").result_set[0][0]
-            gz_a = gz.query("MATCH (n:VesselAnchor) RETURN count(n)").result_set[0][0]
-            results["legacy_terrain"] = t_count
-            results["legacy_agents"] = a_count
-            results["gz_terrain_existing"] = gz_t
-            results["gz_vessels_existing"] = gz_a
-            results["terrain_to_migrate"] = t_count  # minus already migrated
-            results["agents_to_migrate"] = a_count
-            return results
-
-        import time
-        t0 = time.time()
-
-        print("Starting terrain migration...")
-        terrain_stats = migrate_terrain(legacy, gz, batch_size=50)
-        results["terrain"] = terrain_stats
-
-        print("Starting agent migration...")
-        agent_stats = migrate_agents(legacy, gz)
-        results["agents"] = agent_stats
-
-        results["duration_seconds"] = round(time.time() - t0, 1)
-
-        # Final counts
-        gz_nodes = gz.query("MATCH (n) RETURN count(n)").result_set[0][0]
-        gz_edges = gz.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0]
-        results["graph_zero_final"] = {"nodes": gz_nodes, "edges": gz_edges}
-
-        return results
-    except Exception as e:
-        return {"error": str(e)}
